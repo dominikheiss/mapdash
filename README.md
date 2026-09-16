@@ -30,7 +30,10 @@ It has been tested on Apple Silicon only.
 ## Use
 
 Start Warcraft III and open the Custom Games list. Maps up to your size limit download
-automatically. Larger ones are listed in the menu; click one to download it.
+automatically. Larger ones are listed in the menu; click one to download it. To find a specific
+map, choose **Search maps…** and type part of the map or lobby name.
+
+When maps are ready, a small banner appears at the top right. Click it to show the maps in Finder.
 
 | Setting | Default |
 |---|---|
@@ -57,7 +60,7 @@ automatically. Larger ones are listed in the menu; click one to download it.
 | No menu bar icon | On MacBooks with a notch, the notch can hide the icon when the menu bar is full. Quit some other menu bar apps. |
 | *MapDash needs an administrator account* | Use an admin account. |
 | *No lobbies found* while the list is open | A game patch probably changed the list. Check for a MapDash update. |
-| Notifications come from Script Editor | Expected. macOS does not show notifications from apps that are not notarized, so MapDash sends them through Script Editor. |
+| *Different version on disk* | Your map folder has an older file with the same name. MapDash never replaces files, so the game downloads the new version itself. Click the entry to show the old file in Finder. |
 | Firewall (e.g. Little Snitch) asks about `curl` | Allow it. MapDash uses `curl` to download from `ugc.cdn.warcraft3-prod.battle.net`. |
 
 For anything else, choose **Copy diagnostics** in the menu and paste the result into a

@@ -30,7 +30,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Instance.explainAndQuit()
             return
         }
-        Notifier.requestPermission()
         if !FirstRun.showIfNeeded() { StartWindow.showIfWanted() }
     }
 }
@@ -90,10 +89,7 @@ struct MenuContent: View {
             .sorted { ($0.value.size ?? 0, $0.value.file) < ($1.value.size ?? 0, $1.value.file) }
     }
 
-    /// Menu titles are plain text; WC3 names carry |cffRRGGBB colour codes.
-    private func clean(_ s: String) -> String {
-        s.replacingOccurrences(of: #"\|c[0-9a-fA-F]{8}|\|r"#, with: "", options: .regularExpression)
-    }
+    private func clean(_ s: String) -> String { cleanName(s) }
 
     var body: some View {
         if let update = model.update {
@@ -104,6 +100,7 @@ struct MenuContent: View {
         }
 
         status
+        Button("Search maps…") { SearchWindow.show(model) }
         Divider()
 
         let downloading = entries([.downloading])
@@ -142,10 +139,14 @@ struct MenuContent: View {
         }
         let conflict = entries([.conflict])
         if !conflict.isEmpty {
-            Menu("Other version already on disk (\(conflict.count))") {
-                ForEach(conflict, id: \.0) { _, e in Text(clean(e.file)) }
+            Menu("Different version on disk (\(conflict.count))") {
+                Text("A file with the same name but different content is already in your map folder.")
+                Text("MapDash never replaces files, so the game downloads these itself when you join.")
+                Text("Click one to show the old file in Finder.")
                 Divider()
-                Text("Left untouched — the game handles these itself.")
+                ForEach(conflict, id: \.0) { _, e in
+                    Button(clean(e.file)) { revealFile(e.file) }
+                }
             }
         }
         let ready = entries([.present, .done, .checking])

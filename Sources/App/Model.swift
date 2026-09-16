@@ -1,3 +1,4 @@
+import AppKit
 import CryptoKit
 import Foundation
 
@@ -18,7 +19,7 @@ enum MapStatus: String, Codable {
 
 /// One map file the game will look for. The key is sha1 + file name: the game finds maps by name,
 /// and hosts share the same map under different names, so each name needs its own file.
-struct MapEntry: Codable {
+struct MapEntry: Codable, Equatable {
     var sha1: String
     var file: String
     var status: MapStatus = .unknown
@@ -47,21 +48,37 @@ private struct SavedState: Codable {
     var hashCache: [String: [String]]
 }
 
+/// What the menu and the search window show. Compared before every publish.
+private struct Snapshot: Equatable {
+    var maps: [String: MapEntry]
+    var scan: ScanState
+    var update: String?
+    var folderBytes: Int64
+    var freeBytes: Int64?
+    var gamePID: pid_t
+    var lastFullScan: Date?
+}
+
+/// Deliberately no @Published: every published change rebuilds the whole menu, and a rebuild
+/// closes any open submenu (Settings closed on each scan). Changes are sent by `publish()` -
+/// only when something visible changed, and never while a menu is open.
 @MainActor
 final class AppModel: ObservableObject {
-    @Published private(set) var maps: [String: MapEntry] = [:]
-    @Published private(set) var scan: ScanState = .starting
-    @Published private(set) var update: (version: String, page: URL?)?
-    @Published private(set) var folderBytes: Int64 = 0
-    @Published private(set) var freeBytes: Int64?         // nil until measured, or if it cannot be
-    @Published private(set) var gamePID: pid_t = 0
-    @Published private(set) var lastFullScan: Date?
+    private(set) var maps: [String: MapEntry] = [:]
+    private(set) var scan: ScanState = .starting
+    private(set) var update: (version: String, page: URL?)?
+    private(set) var folderBytes: Int64 = 0
+    private(set) var freeBytes: Int64?         // nil until measured, or if it cannot be
+    private(set) var gamePID: pid_t = 0
+    private(set) var lastFullScan: Date?
     let settings = Settings()
 
     private var active: [String: Process] = [:]
     private var hashCache: [String: [String]] = [:]   // path -> [size|mtime key, sha1]
     private var readyBatch: [String] = []
     private var pausedForSpace = false
+    private var lastSent: Snapshot?
+    private var menuOpen = false
     private var dirty = false
     private var ticks = 0
 
@@ -82,6 +99,26 @@ final class AppModel: ObservableObject {
         checkForUpdate()
         refreshFolderSize()
         refreshFreeSpace()
+        let center = NotificationCenter.default
+        center.addObserver(forName: NSMenu.didBeginTrackingNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.menuOpen = true }
+        }
+        center.addObserver(forName: NSMenu.didEndTrackingNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                self?.menuOpen = false
+                self?.publish()
+            }
+        }
+    }
+
+    /// Tells SwiftUI about changes, see the class comment.
+    func publish() {
+        guard !menuOpen else { return }
+        let now = Snapshot(maps: maps, scan: scan, update: update?.version, folderBytes: folderBytes,
+                           freeBytes: freeBytes, gamePID: gamePID, lastFullScan: lastFullScan)
+        guard now != lastSent else { return }
+        lastSent = now
+        objectWillChange.send()
     }
 
     /// Downloads stay paused while this is true; the menu says so.
@@ -226,6 +263,7 @@ final class AppModel: ObservableObject {
         if ticks % 30 == 0 { refreshFolderSize() }
         if ticks % 43200 == 0 { checkForUpdate() }
         save()
+        publish()
     }
 
     private func partURL(_ key: String) -> URL {
@@ -288,11 +326,10 @@ final class AppModel: ObservableObject {
             // One summary once the automatic queue has drained - a lobby list can hold dozens of
             // missing maps, and one notification each would bury the screen.
             if settings.notify {
-                if readyBatch.count == 1 {
-                    Notifier.post("Map ready", readyBatch[0])
-                } else {
-                    Notifier.post("\(readyBatch.count) maps ready", readyBatch.sorted().joined(separator: ", "))
-                }
+                let names = readyBatch.sorted()
+                Toast.show(title: names.count == 1 ? "Map ready" : "\(names.count) maps ready",
+                           body: names.map(cleanName).joined(separator: ", "),
+                           reveal: names.map { Paths.mapDir.appendingPathComponent($0) })
             }
             readyBatch = []
         }
@@ -300,13 +337,15 @@ final class AppModel: ObservableObject {
         let stale = maps.filter { now.timeIntervalSince($0.value.lastSeen) > Constants.forgetAfter && active[$0.key] == nil }
         for key in stale.keys { maps[key] = nil }
         dirty = true
+        publish()
     }
 
     private func verifyExisting(_ key: String, _ target: URL) {
         let attrs = try? FileManager.default.attributesOfItem(atPath: target.path)
         let stamp = "\((attrs?[.size] as? Int64) ?? 0)|\(Int((attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0))"
         if let cached = hashCache[target.path], cached.count == 2, cached[0] == stamp {
-            maps[key]?.status = cached[1] == maps[key]?.sha1 ? .present : .conflict
+            let sha = maps[key]?.sha1
+            maps[key]?.status = cached[1] == sha ? .present : .conflict
             return
         }
         maps[key]?.status = .checking
@@ -315,8 +354,10 @@ final class AppModel: ObservableObject {
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.hashCache[target.path] = [stamp, digest]
-                self.maps[key]?.status = digest == self.maps[key]?.sha1 ? .present : .conflict
+                let sha = self.maps[key]?.sha1
+                self.maps[key]?.status = digest == sha ? .present : .conflict
                 self.dirty = true
+                self.publish()
             }
         }
     }
@@ -426,7 +467,9 @@ final class AppModel: ObservableObject {
                 entry.status = .done
                 Log.write("ready \(entry.sha1) \(entry.file)")
                 if entry.requested {
-                    if settings.notify { Notifier.post("Map ready", entry.file) }
+                    if settings.notify {
+                        Toast.show(title: "Map ready", body: cleanName(entry.file), reveal: [target])
+                    }
                 } else {
                     readyBatch.append(entry.file)
                 }
@@ -456,7 +499,10 @@ final class AppModel: ObservableObject {
     func refreshFolderSize() {
         Task.detached(priority: .background) {
             let total = folderSize(Paths.mapDir)
-            await MainActor.run { [weak self] in self?.folderBytes = total }
+            await MainActor.run { [weak self] in
+                self?.folderBytes = total
+                self?.publish()
+            }
         }
     }
 
@@ -465,6 +511,7 @@ final class AppModel: ObservableObject {
             Task { @MainActor in
                 guard let version, UpdateCheck.isNewer(version, than: UpdateCheck.current) else { return }
                 self?.update = (version, page)
+                self?.publish()
             }
         }
     }
@@ -474,6 +521,7 @@ final class AppModel: ObservableObject {
             let free = freeSpace(near: Paths.mapDir)
             await MainActor.run { [weak self] in
                 self?.freeBytes = free
+                self?.publish()
             }
         }
     }

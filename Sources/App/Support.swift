@@ -2,7 +2,6 @@ import AppKit
 import CryptoKit
 import Foundation
 import ServiceManagement
-import UserNotifications
 
 enum Paths {
     static let home = FileManager.default.homeDirectoryForCurrentUser
@@ -121,6 +120,11 @@ func mapFileName(fromHostPath path: String) -> String? {
     return name
 }
 
+/// Menu and list titles are plain text; WC3 names carry |cffRRGGBB colour codes.
+func cleanName(_ s: String) -> String {
+    s.replacingOccurrences(of: #"\|c[0-9a-fA-F]{8}|\|r"#, with: "", options: .regularExpression)
+}
+
 func formatMB(_ bytes: Int64) -> String {
     let mb = Double(bytes) / 1_000_000
     return mb >= 1 ? String(format: "%.0f MB", mb) : String(format: "%.1f MB", mb)
@@ -145,40 +149,6 @@ func run(_ launchPath: String, _ args: [String], completion: @escaping (Int32, S
     } catch {
         completion(-1, "", error.localizedDescription)
         return nil
-    }
-}
-
-/// macOS refuses notification permission to apps without an Apple signature, silently: the
-/// request fails with "not allowed" and posted notifications are stored with style "none", never
-/// shown (measured with a fresh ad-hoc app and in usernoted's database). The fallback posts through
-/// osascript, which macOS shows under Script Editor.
-enum Notifier {
-    private static var authorized = false
-
-    static func requestPermission() {
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
-            DispatchQueue.main.async { authorized = granted }
-            if !granted { Log.write("notifications not allowed (\(error?.localizedDescription ?? "denied")) - using Script Editor") }
-        }
-    }
-
-    static func post(_ title: String, _ body: String) {
-        guard authorized else {
-            // Title and body travel as arguments, never as script text.
-            _ = run("/usr/bin/osascript", ["-e", "on run argv", "-e",
-                                          "display notification (item 2 of argv) with title (item 1 of argv)",
-                                          "-e", "end run", title, body]) { code, _, err in
-                if code != 0 { Log.write("notification failed: \(err)") }
-            }
-            return
-        }
-        let content = UNMutableNotificationContent()
-        content.title = title
-        content.body = body
-        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
-        UNUserNotificationCenter.current().add(request) { error in
-            if let error { Log.write("notification failed: \(error.localizedDescription)") }
-        }
     }
 }
 
