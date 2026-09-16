@@ -425,8 +425,8 @@ final class AppModel: ObservableObject {
     }
 
     func checkForUpdate() {
-        UpdateCheck.latest { version, page in
-            Task { @MainActor [weak self] in
+        UpdateCheck.latest { [weak self] version, page in
+            Task { @MainActor in
                 guard let version, UpdateCheck.isNewer(version, than: UpdateCheck.current) else { return }
                 self?.update = (version, page)
             }
