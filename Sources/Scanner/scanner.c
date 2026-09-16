@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #define GAME_SUFFIX "/Warcraft III.app/Contents/MacOS/Warcraft III"
 // Measured on an M4 (game under Rosetta): all 79 of 79 objects sat in untagged read-write
@@ -53,7 +54,12 @@ pid_t md_find_game(void) {
   for (int i = 0; i < n && !found; i++) {
     if (pids[i] <= 0 || proc_pidpath(pids[i], path, sizeof path) <= 0) continue;
     size_t pl = strlen(path);
-    if (pl >= sl && strcmp(path + pl - sl, GAME_SUFFIX) == 0) found = pids[i];
+    if (pl < sl || strcmp(path + pl - sl, GAME_SUFFIX) != 0) continue;
+    // With fast user switching another account's game can run at the same time. Its maps belong
+    // in that account's folder, and its task port is not ours to take anyway.
+    struct proc_bsdinfo bsd;
+    if (proc_pidinfo(pids[i], PROC_PIDTBSDINFO, 0, &bsd, PROC_PIDTBSDINFO_SIZE) != PROC_PIDTBSDINFO_SIZE) continue;
+    if (bsd.pbi_uid == getuid()) found = pids[i];
   }
   free(pids);
   return found;

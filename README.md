@@ -1,108 +1,91 @@
 # MapDash
 
-**Warcraft III: Reforged on macOS downloads custom maps at ~250 KB/s. MapDash fetches them before you join.**
+**Faster custom map downloads for Warcraft III: Reforged on macOS.**
 
-The game's own map download on the Mac is stuck at a few hundred KB/s. The server is not the
-bottleneck: the same map comes off Blizzard's map server at 30+ MB/s with any other client. And a
-running in-game download cannot be cancelled.
-
-MapDash sits in the menu bar while you browse the Custom Games list. It reads the list out of the
-running game, downloads the maps you don't have straight from Blizzard's map server, and puts
-them where the game looks for them. When you click *Join*, the map is already there and the game
-skips its download.
+On the Mac, the game downloads custom maps at a few hundred KB/s. MapDash reads the Custom Games
+list from the running game and downloads the missing maps straight from Blizzard's map server
+before you join, at full speed.
 
 > [!WARNING]
-> MapDash reads the memory of the running game (read-only). That is very likely against
-> Blizzard's terms of service, and Blizzard could act against your account. **Use it at your own
-> risk.** MapDash is not affiliated with or endorsed by Blizzard Entertainment.
+> MapDash reads the game's memory (read-only). That is very likely against Blizzard's terms of
+> service and could put your account at risk. **Use at your own risk.**
+> Not affiliated with or endorsed by Blizzard Entertainment.
+
+## Requirements
+
+- macOS 13 or later
+- An **administrator** account. Standard accounts are not supported.
+- A private Mac. Security software on company-managed Macs flags memory reading.
+
+It has been tested on Apple Silicon only.
 
 ## Install
 
-1. Download `MapDash-<version>.zip` from [Releases](../../releases) and unzip it.
-2. Move `MapDash.app` to *Applications* and open it.
-3. macOS blocks it the first time, because the app is not notarized by Apple (that needs a paid
-   developer account). Open *System Settings → Privacy & Security*, scroll down to
-   *"MapDash" was blocked…* and click **Open Anyway**. Confirm once more.
-4. Read the notice, click *I understand*, allow notifications if you want them.
-5. A box icon appears in the menu bar. Optional: *Settings → Start at login*.
-
-Requirements: macOS 13 or later. Tested on Apple Silicon; the Intel build starts, but nobody has
-tried it with the game on an Intel Mac yet.
+1. Download `MapDash-<version>.zip` from [Releases](../../releases), unzip it, and move
+   `MapDash.app` to *Applications*.
+2. Open it. macOS blocks it the first time because it is not notarized. To allow it, go to
+   *System Settings → Privacy & Security* and click **Open Anyway**.
+3. Look for the box icon at the top right of the menu bar. MapDash has no window.
 
 ## Use
 
-Start Warcraft III and open the Custom Games list. That is all — maps up to the size limit
-download on their own. The menu shows:
+Start Warcraft III and open the Custom Games list. Maps up to your size limit download
+automatically. Larger ones are listed in the menu; click one to download it.
 
-| Entry | Meaning |
+| Setting | Default |
 |---|---|
-| *N lobbies in the list* | MapDash can read the game |
-| *Downloading* | with progress; the menu bar icon shows the total |
-| *Large maps — click to download* | above your limit; one click fetches it |
-| *Failed — click to retry* | with the reason |
-| *Other version already on disk* | a different map with the same file name is in your folder. MapDash never replaces it; the game handles it |
-| *Ready* | maps that are on disk |
-| *Map folder: … MB* | size of the game's download folder |
+| Download small maps automatically | on |
+| Automatic up to (25 MB – no limit) | 50 MB |
+| Downloads at once (1–3) | 2 |
+| Speed limit per download | none |
+| Notify when maps are ready | on |
+| Start at login | off |
 
-### Settings
+## Guarantees
 
-| Setting | Choices | Default |
-|---|---|---|
-| Download small maps automatically | on / off | on |
-| Automatic up to | 25, 50, 100, 150, 250, 500 MB, no limit | 50 MB |
-| Downloads at once | 1–3 | 2 |
-| Speed limit per download | none, 5, 10, 20 MB/s | none |
-| Notify when maps are ready | on / off | on |
-| Start at login | on / off | off |
-
-## What it does and doesn't do
-
-- **Reads** the game's memory; never writes to it, never pauses it.
-- **Downloads** from `ugc.cdn.warcraft3-prod.battle.net`, the same server the game uses, and only
-  keeps a file whose SHA-1 matches the hash the lobby host advertised.
-- **Never deletes or overwrites** a map. Your download folder grows over time; clean it up
-  yourself if you want (*Open map folder*).
-- If the same map is already on disk under another name, it is copied locally instead of
-  downloaded again (the game looks maps up by file name).
-- Closed lobbies can linger in the game's memory for a while, so MapDash may fetch a map for a
-  lobby that just disappeared. Harmless.
-- It cannot tell which lobby you have selected; it prepares all of them.
-
-Files: settings in the app's preferences, state in `~/Library/Application Support/MapDash/`,
-log in `~/Library/Logs/MapDash.log` (*Open log*).
+- The game is only read. MapDash never writes to it or pauses it.
+- A file is kept only if its SHA-1 matches the one the lobby advertises.
+- Map files are never deleted or replaced.
+- If a map already exists under a different file name, MapDash copies the local file instead of
+  downloading it again.
+- Downloads pause while less than 5 GB of disk space is free.
 
 ## Troubleshooting
 
-**"MapDash may not read the game"** — your macOS account is not an administrator. Click
-*Grant access…* and enter an administrator's password once; it adds your account to the system
-group *Developer Tools* (`_developer`), which is what allows reading the game.
+| Problem | What to do |
+|---|---|
+| No menu bar icon | On MacBooks with a notch, the notch can hide the icon when the menu bar is full. Quit some other menu bar apps. |
+| *MapDash needs an administrator account* | Use an admin account. |
+| *No lobbies found* while the list is open | A game patch probably changed the list. Check for a MapDash update. |
+| Notifications come from Script Editor | Expected. macOS does not show notifications from apps that are not notarized, so MapDash sends them through Script Editor. |
+| Firewall (e.g. Little Snitch) asks about `curl` | Allow it. MapDash uses `curl` to download from `ugc.cdn.warcraft3-prod.battle.net`. |
 
-**"No lobbies found"** while the Custom Games list is open — a game patch has probably changed
-how the list is stored. Check for a MapDash update (the menu shows one when available) or open an
-issue.
-
-**No notifications** — *System Settings → Notifications → MapDash*.
+For anything else, choose **Copy diagnostics** in the menu and paste the result into a
+[GitHub issue](../../issues).
 
 ## Uninstall
 
-Quit MapDash from its menu and delete the app. Optionally delete
-`~/Library/Application Support/MapDash` and `~/Library/Logs/MapDash.log`. Downloaded maps stay
-in the game's folder.
+1. Quit MapDash and delete the app.
+2. Optionally, delete `~/Library/Application Support/MapDash` and `~/Library/Logs/MapDash.log`.
 
-## Build from source
+Downloaded maps stay in the game's folder.
 
-Needs only the Command Line Tools (`xcode-select --install`), not Xcode.
+## Build
+
+Requires the Command Line Tools only (`xcode-select --install`):
 
 ```
-scripts/build.sh      # -> build/MapDash.app and build/MapDash-<version>.zip
+scripts/build.sh      # -> build/MapDash.app, build/MapDash-<version>.zip
 ```
 
-How it works, in short: `Sources/Scanner/scanner.c` finds the game, takes its task port
-(`task_for_pid` — allowed without root because the game binary carries `get-task-allow` and
-admin accounts belong to `_developer`) and scans for the lobby objects, which carry each lobby's
-W3-encoded statstring with map path, host and the map's SHA-1. The Swift app turns that into
-downloads from `https://ugc.cdn.warcraft3-prod.battle.net/W3-maps-user/<sha1>.map`.
+`Sources/Scanner/scanner.c` finds the lobby objects in the game's memory. Each object holds the
+map path, the host and the map's SHA-1. Reading works without root because:
+- the game binary carries `get-task-allow`;
+- admin accounts are members of `_developer`.
+
+The Swift app downloads each map from
+`https://ugc.cdn.warcraft3-prod.battle.net/W3-maps-user/<sha1>.map`.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE).

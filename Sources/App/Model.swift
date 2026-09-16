@@ -53,26 +53,40 @@ final class AppModel: ObservableObject {
     @Published private(set) var scan: ScanState = .starting
     @Published private(set) var update: (version: String, page: URL?)?
     @Published private(set) var folderBytes: Int64 = 0
+    @Published private(set) var freeBytes: Int64?         // nil until measured, or if it cannot be
+    @Published private(set) var gamePID: pid_t = 0
+    @Published private(set) var lastFullScan: Date?
     let settings = Settings()
 
     private var active: [String: Process] = [:]
     private var hashCache: [String: [String]] = [:]   // path -> [size|mtime key, sha1]
     private var readyBatch: [String] = []
+    private var pausedForSpace = false
     private var dirty = false
     private var ticks = 0
 
     init() {
+        // SwiftUI may build the model of a second copy too; that copy must not scan or download.
+        guard !Instance.isDuplicate else { return }
         try? FileManager.default.createDirectory(at: Paths.appDir, withIntermediateDirectories: true)
         load()
         removeOwnPartFiles()
         Log.write("MapDash \(UpdateCheck.current) started")
         startScanLoop()
-        Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+        // Common modes: a scheduledTimer sits in the default mode only and stops while an alert
+        // is open, which left progress and state saving frozen behind an unanswered start window.
+        let timer = Timer(timeInterval: 2, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.tick() }
         }
+        RunLoop.main.add(timer, forMode: .common)
         checkForUpdate()
         refreshFolderSize()
+        refreshFreeSpace()
     }
+
+    /// Downloads stay paused while this is true; the menu says so.
+    /// An unknown free space does not block: a volume that cannot report it must not stop MapDash.
+    var lowSpace: Bool { freeBytes.map { $0 < settings.minFreeBytes } ?? false }
 
     // MARK: persistence
 
@@ -118,7 +132,7 @@ final class AppModel: ObservableObject {
             while true {
                 let pid = md_find_game()
                 if pid == 0 {
-                    await self?.scanFinished(state: .gameNotRunning, games: nil)
+                    await self?.scanFinished(state: .gameNotRunning, pid: 0, games: nil, fullScan: false)
                     try? await Task.sleep(nanoseconds: Constants.idleInterval * 1_000_000_000)
                     continue
                 }
@@ -126,11 +140,13 @@ final class AppModel: ObservableObject {
                 var kr: Int32 = 0
                 var n = md_scan(pid, 0, &buffer, Int32(buffer.count), &kr)
                 var games = n > 0 ? Array(buffer[0..<Int(n)]).map(Lobby.init) : []
+                var fullScan = false
                 if n >= 0 && round % Constants.fullScanEvery == 0 {
                     // Cross-check the fast region filter against a scan of all memory. A lobby
                     // opened between two scans is not a miss, so the fast scan runs again after
                     // the full one and only what neither fast scan saw is reported.
                     n = md_scan(pid, 1, &buffer, Int32(buffer.count), &kr)
+                    fullScan = n >= 0
                     if n > 0 {
                         let full = Array(buffer[0..<Int(n)]).map(Lobby.init)
                         var fast = Set(games.map(\.sha1))
@@ -144,13 +160,15 @@ final class AppModel: ObservableObject {
                     }
                 }
                 let state: ScanState = n == -1 ? .noAccess(kr) : n < 0 ? .failed : .reading(games.count)
-                await self?.scanFinished(state: state, games: n >= 0 ? games : nil)
+                await self?.scanFinished(state: state, pid: pid, games: n >= 0 ? games : nil, fullScan: fullScan)
                 try? await Task.sleep(nanoseconds: Constants.scanInterval * 1_000_000_000)
             }
         }
     }
 
-    private func scanFinished(state: ScanState, games: [Lobby]?) {
+    private func scanFinished(state: ScanState, pid: pid_t, games: [Lobby]?, fullScan: Bool) {
+        if pid != gamePID { gamePID = pid }
+        if fullScan { lastFullScan = Date() }
         if state != scan {
             if case .noAccess(let kr) = state { Log.write("cannot read the game (task_for_pid \(kr))") }
             scan = state
@@ -204,6 +222,7 @@ final class AppModel: ObservableObject {
             maps[key]?.doneBytes = bytes
         }
         step()
+        if ticks % 5 == 0 { refreshFreeSpace() }
         if ticks % 30 == 0 { refreshFolderSize() }
         if ticks % 43200 == 0 { checkForUpdate() }
         save()
@@ -237,6 +256,12 @@ final class AppModel: ObservableObject {
             if maps[key]?.status == .unknown { probe(key) }
         }
 
+        // Logged here, where the decision is made: both the free space and the limit can change.
+        if lowSpace != pausedForSpace {
+            pausedForSpace = lowSpace
+            Log.write(lowSpace ? "downloads paused: \((freeBytes ?? 0) / 1_000_000_000) GB free" : "downloads resumed")
+        }
+
         var candidates: [(requested: Bool, size: Int64, key: String)] = []
         for (key, entry) in maps where [.queued, .large, .waiting].contains(entry.status) {
             let size = entry.size ?? 0
@@ -250,7 +275,8 @@ final class AppModel: ObservableObject {
         // Clicked maps first, then the smallest - the most lobbies become joinable soonest.
         candidates.sort { ($0.requested ? 0 : 1, $0.size) < ($1.requested ? 0 : 1, $1.size) }
         for c in candidates {
-            if active.count >= settings.parallel {
+            // A full disk is paused, not failed: the maps wait in the queue until space returns.
+            if active.count >= settings.parallel || lowSpace {
                 maps[c.key]?.status = .queued
             } else {
                 startDownload(c.key)
@@ -331,6 +357,16 @@ final class AppModel: ObservableObject {
 
     private func startDownload(_ key: String) {
         guard let entry = maps[key] else { return }
+        // The game creates this folder on its first download; a fresh install may not have it yet.
+        do {
+            try FileManager.default.createDirectory(at: Paths.mapDir, withIntermediateDirectories: true)
+        } catch {
+            maps[key]?.status = .failed
+            maps[key]?.error = "cannot create the map folder: \(error.localizedDescription)"
+            maps[key]?.attempts += 1
+            maps[key]?.retryAt = Date().addingTimeInterval(Constants.retryAfter)
+            return
+        }
         let part = partURL(key)
         let hash = entry.sha1
         // Same map already on disk under another name: copy it (an APFS clone, no extra space).
@@ -433,11 +469,23 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func grantAccess() {
-        Access.grant { ok, message in
-            Log.write(ok ? "added the user to _developer" : "granting access failed: \(message)")
+    func refreshFreeSpace() {
+        Task.detached(priority: .background) {
+            let free = freeSpace(near: Paths.mapDir)
+            await MainActor.run { [weak self] in
+                self?.freeBytes = free
+            }
         }
     }
+}
+
+/// Free space on the volume holding `dir` (or its nearest existing parent - the map folder may not
+/// exist yet). "Important usage" counts purgeable space, which is what Finder shows.
+private func freeSpace(near dir: URL) -> Int64? {
+    var url = dir
+    while !FileManager.default.fileExists(atPath: url.path) && url.path != "/" { url.deleteLastPathComponent() }
+    return (try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?
+        .volumeAvailableCapacityForImportantUsage
 }
 
 private func folderSize(_ dir: URL) -> Int64 {

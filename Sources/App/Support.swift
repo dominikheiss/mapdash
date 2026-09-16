@@ -19,7 +19,10 @@ enum Constants {
     static let mapExtensions = [".w3x", ".w3m"]
     static let scanInterval: UInt64 = 4          // seconds between scans while the game runs
     static let idleInterval: UInt64 = 5          // seconds between looks for the game
-    static let fullScanEvery = 15                // every n-th scan also reads all memory
+    // Every n-th scan also reads all memory to cross-check the fast region filter. A full scan
+    // walks all of the game's readable memory; on 8 GB Macs that pressure is spaced out further.
+    // (A judgement call, not a measurement - no 8 GB Mac was available to test on.)
+    static let fullScanEvery = ProcessInfo.processInfo.physicalMemory <= 8 << 30 ? 45 : 15
     static let retryAfter: TimeInterval = 300
     static let maxAttempts = 3
     static let forgetAfter: TimeInterval = 7 * 86400
@@ -37,7 +40,8 @@ final class Settings: ObservableObject {
     // init's body, so reading there returned false/0 on a fresh install (auto-download off).
     private static let defaultsRegistered: UserDefaults = {
         let d = UserDefaults.standard
-        d.register(defaults: ["auto": true, "thresholdMB": 50, "parallel": 2, "rateLimitMB": 0, "notify": true])
+        d.register(defaults: ["auto": true, "thresholdMB": 50, "parallel": 2, "rateLimitMB": 0, "notify": true,
+                              "minFreeGB": 5, "hideStartWindow": false])
         return d
     }()
 
@@ -61,6 +65,9 @@ final class Settings: ObservableObject {
             if actual != wanted { DispatchQueue.main.async { self.startAtLogin = actual } }
         }
     }
+
+    /// No new download starts below this much free space. Not in the menu; `defaults write` only.
+    var minFreeBytes: Int64 { Int64(Settings.defaultsRegistered.integer(forKey: "minFreeGB")) * 1_000_000_000 }
 
     /// True when a map of this size should download without a click.
     func autoAllows(_ size: Int64) -> Bool {
@@ -141,15 +148,30 @@ func run(_ launchPath: String, _ args: [String], completion: @escaping (Int32, S
     }
 }
 
+/// macOS refuses notification permission to apps without an Apple signature, silently: the
+/// request fails with "not allowed" and posted notifications are stored with style "none", never
+/// shown (measured with a fresh ad-hoc app and in usernoted's database). The fallback posts through
+/// osascript, which macOS shows under Script Editor.
 enum Notifier {
+    private static var authorized = false
+
     static func requestPermission() {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
-            if let error { Log.write("notification permission error: \(error.localizedDescription)") }
-            else if !granted { Log.write("notifications not allowed by the user") }
+            DispatchQueue.main.async { authorized = granted }
+            if !granted { Log.write("notifications not allowed (\(error?.localizedDescription ?? "denied")) - using Script Editor") }
         }
     }
 
     static func post(_ title: String, _ body: String) {
+        guard authorized else {
+            // Title and body travel as arguments, never as script text.
+            _ = run("/usr/bin/osascript", ["-e", "on run argv", "-e",
+                                          "display notification (item 2 of argv) with title (item 1 of argv)",
+                                          "-e", "end run", title, body]) { code, _, err in
+                if code != 0 { Log.write("notification failed: \(err)") }
+            }
+            return
+        }
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
@@ -190,17 +212,21 @@ enum UpdateCheck {
     }
 }
 
-/// Non-admin accounts are not in _developer and cannot read the game. Adding them needs an admin
-/// password once; macOS asks for it through the standard dialog.
-enum Access {
-    static func grant(completion: @escaping (Bool, String) -> Void) {
-        let user = NSUserName()
-        let script = "do shell script \"/usr/sbin/dseditgroup -o edit -a \(user) -t user _developer\" with administrator privileges"
-        DispatchQueue.global().async {
-            var error: NSDictionary?
-            NSAppleScript(source: script)?.executeAndReturnError(&error)
-            let message = (error?[NSAppleScript.errorMessage] as? String) ?? ""
-            DispatchQueue.main.async { completion(error == nil, message) }
-        }
-    }
+/// MapDash supports admin accounts only: macOS lets members of _developer take the game's task
+/// port, and _developer nests the admin group by default. Asked once per launch.
+enum Account {
+    static let isAdmin: Bool? = {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/dsmemberutil")
+        p.arguments = ["checkmembership", "-U", NSUserName(), "-G", "admin"]
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return nil }
+        let text = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        p.waitUntilExit()
+        if text.contains("is not a member") { return false }
+        if text.contains("is a member") { return true }
+        return nil
+    }()
 }

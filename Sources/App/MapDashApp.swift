@@ -8,19 +8,55 @@ struct MapDashApp: App {
     @StateObject private var model = AppModel()
 
     var body: some Scene {
-        MenuBarExtra {
-            MenuContent(model: model, settings: model.settings)
+        // A second copy never builds its model (no scanning, no downloads) and shows no icon; its
+        // delegate points at the running copy and quits.
+        MenuBarExtra(isInserted: .constant(!Instance.isDuplicate)) {
+            if !Instance.isDuplicate { MenuContent(model: model, settings: model.settings) }
         } label: {
-            MenuLabel(model: model)
+            if !Instance.isDuplicate { MenuLabel(model: model) }
         }
         .menuBarExtraStyle(.menu)
     }
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        // Read before anything else handles the launch event.
+        StartWindow.launchedAtLogin = StartWindow.isLoginLaunch()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if Instance.isDuplicate {
+            Instance.explainAndQuit()
+            return
+        }
         Notifier.requestPermission()
-        FirstRun.showIfNeeded()
+        if !FirstRun.showIfNeeded() { StartWindow.showIfWanted() }
+    }
+}
+
+/// Only one MapDash may run: two copies would download the same maps into the same folder.
+enum Instance {
+    static let isDuplicate: Bool = {
+        let me = NSRunningApplication.current
+        guard let id = Bundle.main.bundleIdentifier else { return false }
+        // The older copy wins; on an exact tie the lower PID does, so two copies started together
+        // never both quit.
+        return NSRunningApplication.runningApplications(withBundleIdentifier: id).contains { other in
+            guard other.processIdentifier != me.processIdentifier, !other.isTerminated else { return false }
+            let a = other.launchDate ?? .distantPast, b = me.launchDate ?? .distantFuture
+            return a < b || (a == b && other.processIdentifier < me.processIdentifier)
+        }
+    }()
+
+    static func explainAndQuit() {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "MapDash is already running"
+        alert.informativeText = StartWindow.whereToFind
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+        NSApp.terminate(nil)
     }
 }
 
@@ -123,6 +159,7 @@ struct MenuContent: View {
         settingsMenu
         Button("Open map folder") { NSWorkspace.shared.open(Paths.mapDir) }
         Button("Open log") { NSWorkspace.shared.open(Paths.logFile) }
+        Button("Copy diagnostics") { Diagnostics.copy(model) }
         Button("About MapDash \(UpdateCheck.current)") { FirstRun.show() }
         Divider()
         Button("Quit MapDash") { NSApp.terminate(nil) }
@@ -134,10 +171,13 @@ struct MenuContent: View {
             Text("Starting…")
         case .gameNotRunning:
             Text("Warcraft III is not running")
-        case .noAccess:
-            Text("MapDash may not read the game")
-            Button("Grant access… (admin password)") { model.grantAccess() }
-            Text("Needed once on accounts without admin rights.")
+        case .noAccess(let kr):
+            Text("MapDash cannot read the game (error \(kr))")
+            if Account.isAdmin == false {
+                Text("MapDash needs an administrator account.")
+            } else {
+                Text("Use Copy diagnostics and open an issue on GitHub.")
+            }
         case .reading(let count):
             if count == 0 {
                 Text("No lobbies found — open the Custom Games list")
@@ -149,6 +189,9 @@ struct MenuContent: View {
             Text("Reading the game list failed")
         }
         if !settings.auto { Text("Auto-download is off") }
+        if model.lowSpace {
+            Text("Downloads paused: less than \(settings.minFreeBytes / 1_000_000_000) GB free")
+        }
         Text("Map folder: \(formatMB(model.folderBytes))")
     }
 
@@ -173,8 +216,11 @@ struct MenuContent: View {
 
 /// The risk notice. Shown once on first start and from "About".
 enum FirstRun {
-    static func showIfNeeded() {
-        if !UserDefaults.standard.bool(forKey: "acceptedNotice") { show() }
+    /// True if the notice was shown (it already says where the icon is).
+    static func showIfNeeded() -> Bool {
+        if UserDefaults.standard.bool(forKey: "acceptedNotice") { return false }
+        show()
+        return true
     }
 
     static func show() {
@@ -189,7 +235,9 @@ enum FirstRun {
         Reading another program's memory is very likely against Blizzard's terms of service. \
         Blizzard could act against your account. You use MapDash at your own risk.
 
-        MapDash never deletes or replaces map files. It lives in the menu bar (box icon).
+        MapDash never deletes or replaces map files.
+
+        \(StartWindow.whereToFind)
 
         Not affiliated with or endorsed by Blizzard Entertainment.
         """
@@ -200,5 +248,60 @@ enum FirstRun {
         } else {
             NSApp.terminate(nil)
         }
+    }
+}
+
+/// A menu bar app has no window, so a double-click seems to do nothing. This says where it went.
+enum StartWindow {
+    static let whereToFind = """
+    MapDash has no window. It runs in the menu bar at the top right of the screen (box icon). \
+    On MacBooks with a notch, a full menu bar can hide it behind the notch - quit a few other \
+    menu bar apps to make room.
+    """
+
+    static var launchedAtLogin = false
+
+    static func showIfWanted() {
+        let d = UserDefaults.standard
+        if launchedAtLogin || d.bool(forKey: "hideStartWindow") { return }
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "MapDash is running"
+        alert.informativeText = whereToFind
+        alert.addButton(withTitle: "OK")
+        alert.showsSuppressionButton = true
+        alert.suppressionButton?.title = "Don't show this again"
+        alert.runModal()
+        if alert.suppressionButton?.state == .on { d.set(true, forKey: "hideStartWindow") }
+    }
+
+    /// No window at login. The launch Apple event carries this flag for login items; whether
+    /// macOS sets it for SMAppService launches is not verified, hence the uptime fallback: a
+    /// login item starts within seconds of the session, a double-click practically never does.
+    static func isLoginLaunch() -> Bool {
+        let event = NSAppleEventManager.shared().currentAppleEvent
+        if event?.eventID == kAEOpenApplication,
+           event?.paramDescriptor(forKeyword: keyAEPropData)?.enumCodeValue == keyAELaunchedAsLogInItem {
+            return true
+        }
+        guard SMAppService.mainApp.status == .enabled, let login = sessionStart() else { return false }
+        return Date().timeIntervalSince(login) < 120
+    }
+
+    /// When the current user logged in on the console, from utmpx.
+    private static func sessionStart() -> Date? {
+        var latest: Date?
+        setutxent()
+        defer { endutxent() }
+        while let entry = getutxent() {
+            let e = entry.pointee
+            guard e.ut_type == USER_PROCESS else { continue }
+            let user = withUnsafeBytes(of: e.ut_user) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
+            let line = withUnsafeBytes(of: e.ut_line) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
+            guard user == NSUserName(), line == "console" else { continue }
+            let date = Date(timeIntervalSince1970: TimeInterval(e.ut_tv.tv_sec))
+            if latest == nil || date > latest! { latest = date }
+        }
+        return latest
     }
 }

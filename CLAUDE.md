@@ -19,8 +19,18 @@ and `private/projects/wc3-mapfetch`. Predecessor (SwiftBar + Python + root daemo
   and only what neither the fast scan before nor after it saw is logged as a miss (a lobby opened
   between two scans is not one).
 - `task_for_pid` without root was proven from a fresh SSH session and against the real game.
-- **Admin accounts only** (owner's decision, 2026-09-16): non-admin accounts are not supported.
-  The *Grant access* button / `Access.grant` is to be removed, not tested or extended.
+- **Admin accounts only** (owner's decision, 2026-09-16): non-admin accounts are not supported;
+  the old *Grant access* path was removed in 0.2.0. Do not bring it back.
+- **Notifications go through osascript** when permission is refused - and it always is for this
+  ad-hoc signed app: a fresh ad-hoc test app got "not allowed" without any prompt, and usernoted's
+  database stored MapDash's notifications with style 0 (never shown). They appear under Script Editor.
+- **Timers belong in `.common` run loop mode.** A `scheduledTimer` stops while an `NSAlert` is
+  modal, which froze state saving behind an unanswered start window.
+- A second copy (same bundle id) must not build a working model: `Instance.isDuplicate` gates the
+  model, the menu bar item and the delegate. Test copies need their own bundle id; a redirected
+  home works with `CFFIXED_USER_HOME=<dir>`.
+- The start window is skipped for login launches. Detection (login-item Apple event, else login
+  item enabled and console session younger than 120 s) is **not verified** with a real login.
 - Open work and the list of known pitfalls for other users live on the brain page
   `private/projects/wc3-mapfetch`, not here.
 - Release: bump `VERSION`, `scripts/build.sh`, `gh release create v<version> build/MapDash-<version>.zip`.
