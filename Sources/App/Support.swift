@@ -15,6 +15,11 @@ enum Constants {
     static let cdn = "https://ugc.cdn.warcraft3-prod.battle.net/W3-maps-user/%@.map"
     static let curl = "/usr/bin/curl"
     static let repo = "dominikheiss/mapdash"
+    static let bundleID = "io.github.dominikheiss.mapdash"
+    static let newIssue = URL(string: "https://github.com/dominikheiss/mapdash/issues/new")!
+    // The game's own download speed on the Mac, measured at 245 KB/s (200-270). Used only for the
+    // "time saved" estimate in the menu.
+    static let gameBytesPerSecond = 250_000.0
     static let mapExtensions = [".w3x", ".w3m"]
     static let scanInterval: UInt64 = 4          // seconds between scans while the game runs
     static let idleInterval: UInt64 = 5          // seconds between looks for the game
@@ -25,6 +30,53 @@ enum Constants {
     static let retryAfter: TimeInterval = 300
     static let maxAttempts = 3
     static let forgetAfter: TimeInterval = 7 * 86400
+}
+
+/// Downloads MapDash did itself. Copies of maps already on disk do not count.
+struct Stats: Codable, Equatable {
+    var day = ""                 // local yyyy-MM-dd the "today" numbers belong to
+    var todayMaps = 0
+    var todayBytes: Int64 = 0
+    var todaySeconds = 0.0
+    var totalMaps = 0
+    var totalBytes: Int64 = 0
+    var totalSeconds = 0.0
+
+    static func dayString(_ date: Date) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        return f.string(from: date)
+    }
+
+    mutating func add(bytes: Int64, seconds: Double, at date: Date = Date()) {
+        let today = Stats.dayString(date)
+        if day != today {
+            day = today
+            todayMaps = 0; todayBytes = 0; todaySeconds = 0
+        }
+        todayMaps += 1; todayBytes += bytes; todaySeconds += seconds
+        totalMaps += 1; totalBytes += bytes; totalSeconds += seconds
+    }
+
+    /// Nil if nothing was downloaded today.
+    func todayLine(now: Date = Date()) -> String? {
+        guard day == Stats.dayString(now), todayMaps > 0 else { return nil }
+        return "Today: " + Stats.describe(todayMaps, todayBytes, todaySeconds)
+    }
+
+    func totalLine() -> String? {
+        totalMaps > 0 ? "All time: " + Stats.describe(totalMaps, totalBytes, totalSeconds) : nil
+    }
+
+    /// "3 maps, 120 MB, about 8 min saved". Saved = the game's time for these bytes minus MapDash's.
+    static func describe(_ maps: Int, _ bytes: Int64, _ seconds: Double) -> String {
+        let saved = max(0, Double(bytes) / Constants.gameBytesPerSecond - seconds)
+        let minutes = Int((saved / 60).rounded())
+        let time = minutes < 1 ? "under a minute"
+            : minutes < 90 ? "about \(minutes) min"
+            : "about \(Int((saved / 3600).rounded())) h"
+        return "\(maps) \(maps == 1 ? "map" : "maps"), \(formatSize(bytes)), \(time) saved"
+    }
 }
 
 /// User settings. The allowed values are fixed lists so the menu can show them as choices.
@@ -125,6 +177,11 @@ func cleanName(_ s: String) -> String {
     s.replacingOccurrences(of: #"\|c[0-9a-fA-F]{8}|\|r"#, with: "", options: .regularExpression)
 }
 
+/// MB up to 10 GB, GB above.
+func formatSize(_ bytes: Int64) -> String {
+    bytes >= 10_000_000_000 ? String(format: "%.1f GB", Double(bytes) / 1_000_000_000) : formatMB(bytes)
+}
+
 func formatMB(_ bytes: Int64) -> String {
     let mb = Double(bytes) / 1_000_000
     return mb >= 1 ? String(format: "%.0f MB", mb) : String(format: "%.1f MB", mb)
@@ -152,22 +209,50 @@ func run(_ launchPath: String, _ args: [String], completion: @escaping (Int32, S
     }
 }
 
+/// A GitHub release, as far as the updater needs it.
+struct Release: Equatable {
+    let version: String
+    let page: URL?
+    let notes: String
+    let zip: URL?
+    let sha256: String?   // GitHub's asset digest, lower-case hex
+}
+
 /// Once a day: is there a newer GitHub release?
 enum UpdateCheck {
     static var current: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
     }
 
-    static func latest(completion: @escaping (String?, URL?) -> Void) {
-        guard let url = URL(string: "https://api.github.com/repos/\(Constants.repo)/releases/latest") else { return }
+    /// Test copies (another bundle id) may read releases from `defaults write <id> updateFeed <url>`.
+    /// The released app always asks GitHub.
+    private static var feed: URL? {
+        if Bundle.main.bundleIdentifier != Constants.bundleID,
+           let custom = UserDefaults.standard.string(forKey: "updateFeed") {
+            return URL(string: custom)
+        }
+        return URL(string: "https://api.github.com/repos/\(Constants.repo)/releases/latest")
+    }
+
+    static func latest(completion: @escaping (Release?) -> Void) {
+        guard let url = feed else { return }
         var request = URLRequest(url: url)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.cachePolicy = .reloadIgnoringLocalCacheData
         URLSession.shared.dataTask(with: request) { data, response, _ in
             guard (response as? HTTPURLResponse)?.statusCode == 200, let data,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let tag = json["tag_name"] as? String else { completion(nil, nil); return }
-            let page = (json["html_url"] as? String).flatMap(URL.init(string:))
-            completion(tag.hasPrefix("v") ? String(tag.dropFirst()) : tag, page)
+                  let tag = json["tag_name"] as? String else { completion(nil); return }
+            let version = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
+            let assets = json["assets"] as? [[String: Any]] ?? []
+            let zip = assets.first { ($0["name"] as? String) == "MapDash-\(version).zip" }
+            let digest = zip?["digest"] as? String
+            completion(Release(
+                version: version,
+                page: (json["html_url"] as? String).flatMap(URL.init(string:)),
+                notes: json["body"] as? String ?? "",
+                zip: (zip?["browser_download_url"] as? String).flatMap(URL.init(string:)),
+                sha256: digest.flatMap { $0.hasPrefix("sha256:") ? String($0.dropFirst(7)).lowercased() : nil }))
         }.resume()
     }
 

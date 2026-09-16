@@ -11,6 +11,19 @@ enum Diagnostics {
         NSPasteboard.general.setString(text, forType: .string)
     }
 
+    /// Copies the report and opens a new GitHub issue that asks for it to be pasted. The report
+    /// is not put into the URL: it can be longer than GitHub accepts there, and the user should
+    /// see what is sent.
+    static func report(_ model: AppModel, title: String) {
+        copy(model)
+        var parts = URLComponents(url: Constants.newIssue, resolvingAgainstBaseURL: false)
+        parts?.queryItems = [
+            URLQueryItem(name: "title", value: title),
+            URLQueryItem(name: "body", value: "What happened:\n\n\nDiagnostics (MapDash copied them to the clipboard - paste them below, and remove anything you do not want to share):\n\n```\n\n```\n"),
+        ]
+        if let url = parts?.url { NSWorkspace.shared.open(url) }
+    }
+
     static func report(_ model: AppModel) -> String {
         let s = model.settings
         var lines: [String] = []
@@ -33,6 +46,7 @@ enum Diagnostics {
             default: arch = "?"
             }
             add("Game", "\(tilde(app.bundleURL?.path ?? "?")) \(version) \(arch)")
+            add("Lobbies last found in", model.lastWorkingGameVersion ?? "never")
         } else {
             add("Game", "not running")
         }
@@ -43,13 +57,14 @@ enum Diagnostics {
         case .reading(let n): add("Reading", "ok, \(n) lobbies")
         case .failed: add("Reading", "region walk failed")
         }
-        add("Last full scan", model.lastFullScan.map { stamp($0) } ?? "none yet")
+        add("Last full scan", (model.lastFullScan.map { stamp($0) } ?? "none yet") + ", empty in a row: \(model.emptyFullScans)")
         add("Free space", model.freeBytes.map { "\($0 / 1_000_000_000) GB" } ?? "unknown")
         add("Map folder", "\(tilde(Paths.mapDir.path)) (\(FileManager.default.fileExists(atPath: Paths.mapDir.path) ? formatMB(model.folderBytes) : "missing"))")
         add("Settings", "auto=\(s.auto) limit=\(s.thresholdMB)MB parallel=\(s.parallel) rate=\(s.rateLimitMB)MB/s "
             + "notify=\(s.notify) login=\(s.startAtLogin) minFree=\(s.minFreeBytes / 1_000_000_000)GB")
         var counts: [String: Int] = [:]
         for e in model.maps.values { counts[e.status.rawValue, default: 0] += 1 }
+        add("Downloads", [model.stats.todayLine(), model.stats.totalLine()].compactMap { $0 }.joined(separator: "; ").nonEmpty ?? "none")
         add("Maps", counts.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: " "))
 
         lines.append("")
@@ -87,4 +102,8 @@ enum Diagnostics {
         var size = MemoryLayout<Int32>.size
         return sysctlbyname(name, &value, &size, nil, 0) == 0 ? value : nil
     }
+}
+
+private extension String {
+    var nonEmpty: String? { isEmpty ? nil : self }
 }

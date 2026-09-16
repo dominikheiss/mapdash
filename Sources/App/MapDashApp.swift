@@ -30,7 +30,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Instance.explainAndQuit()
             return
         }
-        if !FirstRun.showIfNeeded() { StartWindow.showIfWanted() }
+        if FirstRun.showIfNeeded() || Updater.announceIfJustUpdated() { return }
+        StartWindow.showIfWanted()
     }
 }
 
@@ -92,10 +93,11 @@ struct MenuContent: View {
     private func clean(_ s: String) -> String { cleanName(s) }
 
     var body: some View {
-        if let update = model.update {
-            Button("Update available: \(update.version)") {
-                if let page = update.page { NSWorkspace.shared.open(page) }
-            }
+        if model.installingUpdate {
+            Text("Installing update…")
+            Divider()
+        } else if let update = model.update {
+            Button("Update available: \(update.version)…") { Updater.offer(update, model: model) }
             Divider()
         }
 
@@ -159,14 +161,52 @@ struct MenuContent: View {
         Divider()
         settingsMenu
         Button("Open map folder") { NSWorkspace.shared.open(Paths.mapDir) }
+        Button("Unused maps…") { UnusedMapsWindow.show() }
         Button("Open log") { NSWorkspace.shared.open(Paths.logFile) }
         Button("Copy diagnostics") { Diagnostics.copy(model) }
+        Button("Report a problem…") { Diagnostics.report(model, title: "") }
         Button("About MapDash \(UpdateCheck.current)") { FirstRun.show() }
         Divider()
-        Button("Quit MapDash") { NSApp.terminate(nil) }
+        Button("Quit MapDash") {
+            model.stopDownloads()
+            NSApp.terminate(nil)
+        }
     }
 
     @ViewBuilder private var status: some View {
+        if let suspect = model.gameUpdateSuspect {
+            // Replaces the usual status lines: after a game patch they would only say "0 lobbies".
+            Text("Warcraft III was updated (\(suspect.old) → \(suspect.new))")
+            if case .reading = model.scan {
+                Text("MapDash finds no lobbies, not even with a full scan.")
+                Text(model.update == nil
+                     ? "If the Custom Games list is open, MapDash needs an update for this game version."
+                     : "If the Custom Games list is open, install the MapDash update above.")
+            } else {
+                Text("MapDash can no longer read the game.")
+                Text(model.update == nil ? "MapDash needs an update for this game version." : "Install the MapDash update above.")
+            }
+            if model.update == nil {
+                Button("Report this on GitHub…") {
+                    Diagnostics.report(model, title: "Not working with Warcraft III \(suspect.new)")
+                }
+            }
+        } else {
+            scanStatus
+        }
+        if !settings.auto { Text("Auto-download is off") }
+        if model.lowSpace {
+            Text("Downloads paused: less than \(settings.minFreeBytes / 1_000_000_000) GB free")
+        }
+        Text("Map folder: \(formatSize(model.folderBytes))")
+        if let today = model.stats.todayLine() { Text(today) }
+        // On the first day both lines would say the same.
+        if let total = model.stats.totalLine(), model.stats.totalMaps != model.stats.todayMaps || model.stats.todayLine() == nil {
+            Text(total)
+        }
+    }
+
+    @ViewBuilder private var scanStatus: some View {
         switch model.scan {
         case .starting:
             Text("Starting…")
@@ -177,7 +217,7 @@ struct MenuContent: View {
             if Account.isAdmin == false {
                 Text("MapDash needs an administrator account.")
             } else {
-                Text("Use Copy diagnostics and open an issue on GitHub.")
+                Button("Report this on GitHub…") { Diagnostics.report(model, title: "Cannot read the game (error \(kr))") }
             }
         case .reading(let count):
             if count == 0 {
@@ -189,11 +229,6 @@ struct MenuContent: View {
         case .failed:
             Text("Reading the game list failed")
         }
-        if !settings.auto { Text("Auto-download is off") }
-        if model.lowSpace {
-            Text("Downloads paused: less than \(settings.minFreeBytes / 1_000_000_000) GB free")
-        }
-        Text("Map folder: \(formatMB(model.folderBytes))")
     }
 
     private var settingsMenu: some View {

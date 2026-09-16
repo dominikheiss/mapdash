@@ -10,7 +10,7 @@ enum SearchWindow {
 
     static func show(_ model: AppModel) {
         if window == nil {
-            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 620, height: 520),
+            let w = EscapeClosingWindow(contentRect: NSRect(x: 0, y: 0, width: 620, height: 520),
                              styleMask: [.titled, .closable, .resizable, .miniaturizable],
                              backing: .buffered, defer: false)
             w.title = "Search maps"
@@ -23,7 +23,24 @@ enum SearchWindow {
         // A menu bar app is never active on its own; without this the window opens behind others.
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
+        // Typing should go straight into the search field. SwiftUI creates the field only at the
+        // first layout, so without the layout pass it is not there yet on first open (measured).
+        window?.contentView?.layoutSubtreeIfNeeded()
+        if let field = window?.contentView.flatMap(firstTextField) { window?.makeFirstResponder(field) }
     }
+
+    private static func firstTextField(in view: NSView) -> NSTextField? {
+        if let field = view as? NSTextField, field.isEditable { return field }
+        for sub in view.subviews {
+            if let found = firstTextField(in: sub) { return found }
+        }
+        return nil
+    }
+}
+
+/// Esc closes the window, as in Spotlight. NSWindow alone only does that for panels and sheets.
+final class EscapeClosingWindow: NSWindow {
+    override func cancelOperation(_ sender: Any?) { close() }
 }
 
 final class SearchQuery: ObservableObject {
@@ -56,14 +73,32 @@ struct SearchView: View {
         [.large, .waiting, .failed].contains(e.status)
     }
 
+    /// Return acts on the top row when it waits for a click (those are sorted first).
+    private func act(on row: Row?) {
+        guard let row else { return }
+        switch row.entry.status {
+        case .large, .waiting: model.fetch(row.id)
+        case .failed: model.retry(row.id)
+        default: break
+        }
+    }
+
+    private func countLine(_ rows: [Row]) -> String {
+        let count = query.text.isEmpty ? "\(rows.count) maps in the lobby list" : "\(rows.count) matches"
+        guard !query.text.isEmpty, let first = rows.first, needsClick(first.entry) else { return count }
+        return count + " · Return downloads \u{201C}\(first.name)\u{201D}"
+    }
+
     var body: some View {
         let rows = rows
         VStack(alignment: .leading, spacing: 8) {
             TextField("Map or lobby name", text: $query.text)
                 .textFieldStyle(.roundedBorder)
-            Text(query.text.isEmpty ? "\(rows.count) maps in the lobby list" : "\(rows.count) matches")
+                .onSubmit { act(on: rows.first) }
+            Text(countLine(rows))
                 .font(.caption)
                 .foregroundColor(.secondary)
+                .lineLimit(1)
             // ScrollView, not List: List is an NSTableView underneath, and refreshing it while
             // downloads progress logged "reentrant operation in its NSTableView delegate" every
             // few seconds - a warning macOS says will become a crash.

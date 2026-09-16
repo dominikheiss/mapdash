@@ -46,6 +46,7 @@ private struct SavedState: Codable {
     var version = 2
     var maps: [String: MapEntry]
     var hashCache: [String: [String]]
+    var stats: Stats?   // added in 0.4.0; absent in older files
 }
 
 /// What the menu and the search window show. Compared before every publish.
@@ -56,7 +57,11 @@ private struct Snapshot: Equatable {
     var folderBytes: Int64
     var freeBytes: Int64?
     var gamePID: pid_t
+    var gameVersion: String?
     var lastFullScan: Date?
+    var emptyFullScans: Int
+    var stats: Stats
+    var installing: Bool
 }
 
 /// Deliberately no @Published: every published change rebuilds the whole menu, and a rebuild
@@ -66,14 +71,20 @@ private struct Snapshot: Equatable {
 final class AppModel: ObservableObject {
     private(set) var maps: [String: MapEntry] = [:]
     private(set) var scan: ScanState = .starting
-    private(set) var update: (version: String, page: URL?)?
+    private(set) var update: Release?
     private(set) var folderBytes: Int64 = 0
     private(set) var freeBytes: Int64?         // nil until measured, or if it cannot be
     private(set) var gamePID: pid_t = 0
+    private(set) var gameVersion: String?
     private(set) var lastFullScan: Date?
+    /// Full scans in a row that found no lobby while the game ran. See `gameUpdateSuspect`.
+    private(set) var emptyFullScans = 0
+    private(set) var stats = Stats()
+    private(set) var installingUpdate = false
     let settings = Settings()
 
     private var active: [String: Process] = [:]
+    private var startedAt: [String: Date] = [:]
     private var hashCache: [String: [String]] = [:]   // path -> [size|mtime key, sha1]
     private var readyBatch: [String] = []
     private var pausedForSpace = false
@@ -115,7 +126,9 @@ final class AppModel: ObservableObject {
     func publish() {
         guard !menuOpen else { return }
         let now = Snapshot(maps: maps, scan: scan, update: update?.version, folderBytes: folderBytes,
-                           freeBytes: freeBytes, gamePID: gamePID, lastFullScan: lastFullScan)
+                           freeBytes: freeBytes, gamePID: gamePID, gameVersion: gameVersion,
+                           lastFullScan: lastFullScan, emptyFullScans: emptyFullScans, stats: stats,
+                           installing: installingUpdate)
         guard now != lastSent else { return }
         lastSent = now
         objectWillChange.send()
@@ -125,6 +138,31 @@ final class AppModel: ObservableObject {
     /// An unknown free space does not block: a volume that cannot report it must not stop MapDash.
     var lowSpace: Bool { freeBytes.map { $0 < settings.minFreeBytes } ?? false }
 
+    /// The game version MapDash last found lobbies in.
+    var lastWorkingGameVersion: String? { UserDefaults.standard.string(forKey: "lastWorkingGameVersion") }
+
+    /// "old -> new" when the game changed since MapDash last found lobbies and it now finds none
+    /// even with a full scan - or cannot read the game at all. An empty list alone proves nothing
+    /// (the Custom Games list may simply be closed), so a fresh install never shows this.
+    var gameUpdateSuspect: (old: String, new: String)? {
+        guard let new = gameVersion, let old = lastWorkingGameVersion, old != new else { return nil }
+        switch scan {
+        case .reading(0) where emptyFullScans > 0: return (old, new)
+        case .noAccess, .failed: return (old, new)
+        default: return nil
+        }
+    }
+
+    func setInstalling(_ value: Bool) {
+        installingUpdate = value
+        publish()
+    }
+
+    /// Ends running curl processes; used before quitting. Their part files are removed at the next start.
+    func stopDownloads() {
+        for process in active.values where process.isRunning { process.terminate() }
+    }
+
     // MARK: persistence
 
     private func load() {
@@ -132,6 +170,7 @@ final class AppModel: ObservableObject {
               let saved = try? JSONDecoder().decode(SavedState.self, from: data), saved.version == 2 else { return }
         maps = saved.maps
         hashCache = saved.hashCache
+        stats = saved.stats ?? Stats()
         for (key, entry) in maps {
             // Anything that was in flight when the app quit starts over.
             switch entry.status {
@@ -146,7 +185,7 @@ final class AppModel: ObservableObject {
     private func save() {
         guard dirty else { return }
         dirty = false
-        let state = SavedState(maps: maps, hashCache: hashCache)
+        let state = SavedState(maps: maps, hashCache: hashCache, stats: stats)
         if let data = try? JSONEncoder().encode(state) {
             try? data.write(to: Paths.stateFile, options: .atomic)
         }
@@ -204,11 +243,18 @@ final class AppModel: ObservableObject {
     }
 
     private func scanFinished(state: ScanState, pid: pid_t, games: [Lobby]?, fullScan: Bool) {
-        if pid != gamePID { gamePID = pid }
-        if fullScan { lastFullScan = Date() }
+        if pid != gamePID { gameStarted(pid) }
+        if fullScan {
+            lastFullScan = Date()
+            emptyFullScans = games?.isEmpty == true ? emptyFullScans + 1 : 0
+        }
         if state != scan {
             if case .noAccess(let kr) = state { Log.write("cannot read the game (task_for_pid \(kr))") }
             scan = state
+        }
+        if case .reading(let n) = state, n > 0, let version = gameVersion, version != lastWorkingGameVersion {
+            UserDefaults.standard.set(version, forKey: "lastWorkingGameVersion")
+            Log.write("lobbies found in game version \(version)")
         }
         var seen: [String: (sha1: String, file: String, lobbies: [String])] = [:]
         for lobby in games ?? [] {
@@ -228,6 +274,18 @@ final class AppModel: ObservableObject {
         }
         dirty = true
         step()
+    }
+
+    private func gameStarted(_ pid: pid_t) {
+        gamePID = pid
+        emptyFullScans = 0
+        guard pid != 0 else { gameVersion = nil; return }
+        let bundle = NSRunningApplication(processIdentifier: pid)?.bundleURL.flatMap(Bundle.init(url:))
+        gameVersion = bundle?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        let known = lastWorkingGameVersion
+        Log.write("game running: version \(gameVersion ?? "unknown")" + (known.map { ", lobbies last found in \($0)" } ?? ""))
+        // A patched game may need a new MapDash, and one may already be out.
+        if let version = gameVersion, let known, version != known { checkForUpdate() }
     }
 
     // MARK: downloading
@@ -436,6 +494,7 @@ final class AppModel: ObservableObject {
         maps[key]?.attempts += 1
         maps[key]?.error = nil
         maps[key]?.doneBytes = 0
+        startedAt[key] = Date()
         Log.write("download \(hash) \(entry.file) (\(entry.size ?? 0) bytes)")
         let process = run(Constants.curl, args) { [weak self] code, _, err in
             Task.detached(priority: .utility) {
@@ -448,6 +507,7 @@ final class AppModel: ObservableObject {
 
     private func finishDownload(_ key: String, code: Int32, err: String, digest: String?) {
         active[key] = nil
+        let started = startedAt.removeValue(forKey: key)
         let part = partURL(key)
         defer { try? FileManager.default.removeItem(at: part) }
         guard var entry = maps[key] else { return }
@@ -466,6 +526,7 @@ final class AppModel: ObservableObject {
                 try FileManager.default.linkItem(at: part, to: target)
                 entry.status = .done
                 Log.write("ready \(entry.sha1) \(entry.file)")
+                if let started { stats.add(bytes: entry.size ?? 0, seconds: Date().timeIntervalSince(started)) }
                 if entry.requested {
                     if settings.notify {
                         Toast.show(title: "Map ready", body: cleanName(entry.file), reveal: [target])
@@ -507,10 +568,11 @@ final class AppModel: ObservableObject {
     }
 
     func checkForUpdate() {
-        UpdateCheck.latest { [weak self] version, page in
+        UpdateCheck.latest { [weak self] release in
             Task { @MainActor in
-                guard let version, UpdateCheck.isNewer(version, than: UpdateCheck.current) else { return }
-                self?.update = (version, page)
+                guard let release, UpdateCheck.isNewer(release.version, than: UpdateCheck.current) else { return }
+                if self?.update?.version != release.version { Log.write("update available: \(release.version)") }
+                self?.update = release
                 self?.publish()
             }
         }
