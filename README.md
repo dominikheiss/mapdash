@@ -35,6 +35,12 @@ map, choose **Search maps…** and type part of the map or lobby name.
 
 When maps are ready, a small banner appears at the top right. Click it to show the maps in Finder.
 
+<p>
+  <img src="docs/menu.png" alt="MapDash menu with maps waiting to download" width="360">
+  <img src="docs/search.png" alt="Search window listing the maps in the lobby list" width="460">
+</p>
+<p><img src="docs/banner.png" alt="Banner shown when maps are ready" width="340"></p>
+
 | Setting | Default |
 |---|---|
 | Download small maps automatically | on |

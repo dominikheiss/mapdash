@@ -34,7 +34,8 @@ plutil -lint "$APP/Contents/Info.plist" >/dev/null
 codesign --force --sign - "$APP"
 codesign --verify --strict "$APP"
 
-(cd "$OUT" && ditto -c -k --keepParent MapDash.app "MapDash-$VERSION.zip")
+# No resource forks or extended attributes: they only add ._ files (com.apple.provenance).
+(cd "$OUT" && ditto -c -k --norsrc --noextattr --keepParent MapDash.app "MapDash-$VERSION.zip")
 rm -rf "$OUT/obj"
 echo "$APP"
 echo "$OUT/MapDash-$VERSION.zip"
