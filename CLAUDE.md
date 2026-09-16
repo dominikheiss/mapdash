@@ -18,7 +18,10 @@ and `private/projects/wc3-mapfetch`. Predecessor (SwiftBar + Python + root daemo
 - The fast scan reads only small untagged rw regions; every 15th round a full scan cross-checks,
   and only what neither the fast scan before nor after it saw is logged as a miss (a lobby opened
   between two scans is not one).
-- `task_for_pid` without root was proven from a fresh SSH session and against the real game. The
-  *Grant access* path (non-admin accounts) is **untested** - no non-admin account was available.
+- `task_for_pid` without root was proven from a fresh SSH session and against the real game.
+- **Admin accounts only** (owner's decision, 2026-09-16): non-admin accounts are not supported.
+  The *Grant access* button / `Access.grant` is to be removed, not tested or extended.
+- Open work and the list of known pitfalls for other users live on the brain page
+  `private/projects/wc3-mapfetch`, not here.
 - Release: bump `VERSION`, `scripts/build.sh`, `gh release create v<version> build/MapDash-<version>.zip`.
   The app checks `releases/latest` once a day.
