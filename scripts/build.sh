@@ -13,7 +13,33 @@ APP="$OUT/MapDash.app"
 MIN=13.0
 
 rm -rf "$OUT"
-mkdir -p "$APP/Contents/MacOS" "$OUT/obj"
+mkdir -p "$APP/Contents/MacOS" "$OUT/obj" \
+    "$APP/Contents/Resources/MapDashBridge/Sources/Probe" \
+    "$APP/Contents/Resources/MapDashBridge/scripts" \
+    "$APP/Contents/Resources/MapDashBridge/bin"
+# Package all rescue dependencies: the app must work independently of this source folder.
+cp "$ROOT"/Sources/Probe/{V23GuidProbe.c,V23LocalSocketProbe.py,V27CDNPathProbe.c,V28Rescue.py,V28Restore.py,V29LobbyBridge.py,V30AutoRescue.py} \
+    "$APP/Contents/Resources/MapDashBridge/Sources/Probe/"
+cp "$ROOT"/scripts/{v28-rescue.sh,v28-restore.sh,v29-lobbies.sh,v30-auto-rescue.sh} \
+    "$APP/Contents/Resources/MapDashBridge/scripts/"
+# Compile a native GUID helper for the live-lobby feed; the V28 rescue helper
+# builds its own two scanner binaries on the user's Mac, as it did in V28.
+for arch in arm64 x86_64; do
+  clang -O2 -Wall -Wextra -Werror -arch "$arch" -mmacosx-version-min=$MIN \
+    "$ROOT/Sources/Probe/V23GuidProbe.c" -o "$OUT/obj/mapdash-guid-$arch"
+done
+lipo -create "$OUT/obj/mapdash-guid-arm64" "$OUT/obj/mapdash-guid-x86_64" \
+  -output "$APP/Contents/Resources/MapDashBridge/bin/mapdash-guid-probe"
+chmod +x "$APP/Contents/Resources/MapDashBridge/bin/mapdash-guid-probe"
+# V30 also bundles the precise, read-only CDN URL scanner. Avoid invoking
+# clang each time Warcraft starts or its WebSocket reconnects.
+for arch in arm64 x86_64; do
+  clang -O2 -Wall -Wextra -Werror -arch "$arch" -mmacosx-version-min=$MIN \
+    "$ROOT/Sources/Probe/V27CDNPathProbe.c" -o "$OUT/obj/mapdash-cdn-$arch"
+done
+lipo -create "$OUT/obj/mapdash-cdn-arm64" "$OUT/obj/mapdash-cdn-x86_64" \
+  -output "$APP/Contents/Resources/MapDashBridge/bin/mapdash-cdn-probe"
+chmod +x "$APP/Contents/Resources/MapDashBridge/bin/mapdash-cdn-probe"
 
 for arch in arm64 x86_64; do
   clang -O2 -Wall -Wextra -arch "$arch" -mmacosx-version-min=$MIN \

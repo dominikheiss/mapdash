@@ -100,11 +100,15 @@ final class AppModel: ObservableObject {
         load()
         removeOwnPartFiles()
         Log.write("MapDash \(UpdateCheck.current) started")
-        startScanLoop()
+        // V29 preview: the obsolete memory-based game decoder is disabled.
+        // The local WebSocket feed (RescueController) is display-only until a
+        // verified content SHA-1 is available. Never auto-download unverified maps.
+        for key in maps.keys { maps[key]?.listed = false; maps[key]?.requested = false }
+        startGamePresenceLoop()
         // Common modes: a scheduledTimer sits in the default mode only and stops while an alert
         // is open, which left progress and state saving frozen behind an unanswered start window.
         let timer = Timer(timeInterval: 2, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.tick() }
+            Task { @MainActor [weak self] in self?.tick() }
         }
         RunLoop.main.add(timer, forMode: .common)
         checkForUpdate()
@@ -112,10 +116,10 @@ final class AppModel: ObservableObject {
         refreshFreeSpace()
         let center = NotificationCenter.default
         center.addObserver(forName: NSMenu.didBeginTrackingNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.menuOpen = true }
+            Task { @MainActor [weak self] in self?.menuOpen = true }
         }
         center.addObserver(forName: NSMenu.didEndTrackingNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 self?.menuOpen = false
                 self?.publish()
             }
@@ -200,6 +204,17 @@ final class AppModel: ObservableObject {
     }
 
     // MARK: scanning
+
+    private func startGamePresenceLoop() {
+        Task.detached(priority: .background) { [weak self] in
+            while true {
+                let pid = md_find_game()
+                await self?.scanFinished(state: pid == 0 ? .gameNotRunning : .reading(0),
+                                         pid: pid, games: [], fullScan: false)
+                try? await Task.sleep(nanoseconds: 6_000_000_000)
+            }
+        }
+    }
 
     private func startScanLoop() {
         Task.detached(priority: .background) { [weak self] in
@@ -409,15 +424,16 @@ final class AppModel: ObservableObject {
         maps[key]?.status = .checking
         Task.detached(priority: .utility) {
             let digest = sha1Hex(of: target) ?? ""
-            await MainActor.run { [weak self] in
-                guard let self else { return }
-                self.hashCache[target.path] = [stamp, digest]
-                let sha = self.maps[key]?.sha1
-                self.maps[key]?.status = digest == sha ? .present : .conflict
-                self.dirty = true
-                self.publish()
-            }
+            await self.finishVerification(key, target: target, stamp: stamp, digest: digest)
         }
+    }
+
+    private func finishVerification(_ key: String, target: URL, stamp: String, digest: String) {
+        hashCache[target.path] = [stamp, digest]
+        let sha = maps[key]?.sha1
+        maps[key]?.status = digest == sha ? .present : .conflict
+        dirty = true
+        publish()
     }
 
     private func probe(_ key: String) {

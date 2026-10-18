@@ -113,3 +113,8 @@ The Swift app downloads each map from
 ## License
 
 MIT, see [LICENSE](LICENSE).
+
+
+### Experimental automatic map rescue
+
+An opt-in toggle (on by default in development builds) watches Warcraft III's local Custom Games WebSocket for the native **Download Map** action. It then tries to find a corresponding CDN content SHA-1, independently downloads and verifies the file, and installs it without overwriting an existing map. This is not pre-click map downloading and remains a beta feature. See [Automatic rescue documentation](docs/automatic-rescue.md) for requirements, limitations, and testing instructions.

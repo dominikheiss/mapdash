@@ -6,12 +6,13 @@ import SwiftUI
 struct MapDashApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
     @StateObject private var model = AppModel()
+    @StateObject private var rescue = RescueController()
 
     var body: some Scene {
         // A second copy never builds its model (no scanning, no downloads) and shows no icon; its
         // delegate points at the running copy and quits.
         MenuBarExtra(isInserted: .constant(!Instance.isDuplicate)) {
-            if !Instance.isDuplicate { MenuContent(model: model, settings: model.settings) }
+            if !Instance.isDuplicate { MenuContent(model: model, settings: model.settings, rescue: rescue) }
         } label: {
             if !Instance.isDuplicate { MenuLabel(model: model) }
         }
@@ -83,6 +84,7 @@ struct MenuLabel: View {
 struct MenuContent: View {
     @ObservedObject var model: AppModel
     @ObservedObject var settings: Settings
+    @ObservedObject var rescue: RescueController
 
     private func entries(_ statuses: [MapStatus], listedOnly: Bool = true) -> [(String, MapEntry)] {
         model.maps
@@ -102,6 +104,32 @@ struct MenuContent: View {
         }
 
         status
+        Divider()
+        if rescue.liveTotal > 0 {
+            Menu("Live Warcraft lobbies (\(rescue.liveTotal))") {
+                Text("Read-only listings — content SHA-1 not yet available")
+                Divider()
+                ForEach(Array(rescue.liveLobbies.prefix(30))) { game in
+                    Text("\(game.title) — \(game.map) (\(game.players)/\(game.capacity))")
+                }
+                if rescue.liveTotal > 30 { Text("Showing first 30 lobbies") }
+            }
+        } else {
+            Text(rescue.socketState)
+        }
+        Toggle("Automatically rescue Warcraft downloads", isOn: Binding(
+            get: { rescue.autoEnabled },
+            set: { rescue.setAutomaticRescue($0) }
+        ))
+        Text(rescue.autoStatus)
+        if !rescue.lastAutoMap.isEmpty {
+            Text("Last rescued: \(rescue.lastAutoMap)")
+        }
+        Button("Restore verified backups") { rescue.restoreSavedMaps() }
+            .disabled(rescue.rescueActive || rescue.restoring)
+        if rescue.restoring { Text("Restoring verified backups…") }
+        Button("Open rescue log") { rescue.openRescueLog() }
+        Divider()
         Button("Search maps…") { SearchWindow.show(model) }
         Divider()
 
@@ -168,13 +196,17 @@ struct MenuContent: View {
         Button("About MapDash \(UpdateCheck.current)") { FirstRun.show() }
         Divider()
         Button("Quit MapDash") {
+            rescue.shutdown()
             model.stopDownloads()
             NSApp.terminate(nil)
         }
     }
 
     @ViewBuilder private var status: some View {
-        if let suspect = model.gameUpdateSuspect {
+        if rescue.socketState == "Connected to Warcraft's live lobby list" {
+            Text("\(rescue.liveTotal) lobbies from Warcraft's local WebSocket")
+            Text("V30: Automatic rescue watches Warcraft's Download Map action")
+        } else if let suspect = model.gameUpdateSuspect {
             // Replaces the usual status lines: after a game patch they would only say "0 lobbies".
             Text("Warcraft III was updated (\(suspect.old) → \(suspect.new))")
             if case .reading = model.scan {
@@ -194,7 +226,7 @@ struct MenuContent: View {
         } else {
             scanStatus
         }
-        if !settings.auto { Text("Auto-download is off") }
+        Text("One native Download Map click still required; MapDash arms itself")
         if model.lowSpace {
             Text("Downloads paused: less than \(settings.minFreeBytes / 1_000_000_000) GB free")
         }
