@@ -151,6 +151,11 @@ enum Updater {
 
     /// A small shell waits for this process to exit, then opens the new app. Only one MapDash may
     /// run, so starting it earlier would make it quit as a duplicate.
+    ///
+    /// One `open` right after the exit is not enough (0.4.0 -> 0.4.1, macOS 27): LaunchServices
+    /// still held the record of the bundle that was moved away, and the launch failed with -600
+    /// procNotFound while it re-registered the new one. So the shell registers the new bundle
+    /// first and retries until the new executable actually runs.
     private static func relaunch(_ app: URL) {
         // `open` starts apps without the caller's environment. Test copies run with a redirected
         // home (CFFIXED_USER_HOME); that must survive the restart, or the test copy would work on
@@ -159,10 +164,21 @@ enum Updater {
         if let home = ProcessInfo.processInfo.environment["CFFIXED_USER_HOME"] {
             openArgs = ["--env", "CFFIXED_USER_HOME=\(home)"]
         }
-        let script = "pid=$1; shift; while /bin/kill -0 \"$pid\" 2>/dev/null; do /bin/sleep 0.2; done; /usr/bin/open \"$@\""
+        let exe = app.appendingPathComponent("Contents/MacOS").path + "/"
+        let lsregister = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+        let script = """
+            pid=$1; app=$2; exe=$3; shift 3
+            while /bin/kill -0 "$pid" 2>/dev/null; do /bin/sleep 0.2; done
+            "\(lsregister)" -f "$app" 2>/dev/null
+            for i in 1 2 3 4 5 6 7 8 9 10; do
+              /bin/ps -axo comm= | /usr/bin/grep -F -q -- "$exe" && exit 0
+              /usr/bin/open "$@" "$app"
+              /bin/sleep 1
+            done
+            """
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/sh")
-        p.arguments = ["-c", script, "sh", String(ProcessInfo.processInfo.processIdentifier)] + openArgs + [app.path]
+        p.arguments = ["-c", script, "sh", String(ProcessInfo.processInfo.processIdentifier), app.path, exe] + openArgs
         try? p.run()
     }
 
