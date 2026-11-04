@@ -7,10 +7,14 @@
 // members of _developer (which nests the admin group by default) take such task ports.
 //
 // Layout of one lobby object (4-byte aligned):
+//   -16 .. -1   game 3.0.1+: 01000000 followed by three small counters
 //   +0  .. +31  lobby name, NUL terminated, 32-byte buffer
-//   +32 .. +47  00000000 01000000 01000000 00000000
+//   +32 .. +47  game 3.0.0: 00000000 01000000 01000000 00000000
+//               game 3.0.1+: all zero (measured on 3.0.1.24371: 69 of 69 live lobbies)
 //   +48         W3 encoded statstring: 13 bytes flags/size/crc, map path NUL, host NUL, 0x00,
 //               20-byte raw SHA-1 of the map file
+// Sixteen zero bytes alone are far too common to anchor on, so the 3.0.1 form also needs the 1 in
+// front of the name; the statstring decode below then rejects anything that is not a lobby.
 // Freed objects of closed lobbies can linger, so a scan may include a few stale lobbies.
 #include "scanner.h"
 
@@ -29,6 +33,15 @@
 #define FAST_MAX_REGION (4ULL << 20)
 
 static const unsigned char HDR[16] = {0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0};
+static const unsigned char ZERO[16] = {0};
+static const unsigned char PRE[4] = {1, 0, 0, 0};
+
+// o is the offset of the +32 header; the lobby name starts 32 bytes before it.
+static int is_header(const unsigned char *p, size_t o) {
+  if (!memcmp(p + o, HDR, 16)) return 1;
+  return o >= 48 && !memcmp(p + o, ZERO, 16) && !memcmp(p + o - 48, PRE, 4) && p[o - 32] != 0 &&
+         (p[o + 16] & 1);  // the statstring's first mask byte always has bit 0 set
+}
 
 static size_t decode(const unsigned char *in, size_t n, unsigned char *out, size_t cap) {
   size_t i = 0, o = 0;
@@ -106,7 +119,7 @@ int md_scan(pid_t pid, int full, md_game_t *out, int cap, int *kern_error) {
       if (mach_vm_read(task, addr, size, &data, &dcnt) == KERN_SUCCESS) {
         unsigned char *p = (unsigned char *)data;
         for (size_t o = 32; o + 16 + 512 < dcnt; o += 4) {
-          if (memcmp(p + o, HDR, 16) != 0) continue;
+          if (!is_header(p, o)) continue;
           unsigned char dec[600];
           size_t dl = decode(p + o + 16, 512, dec, sizeof dec - 1);
           dec[dl] = 0;
