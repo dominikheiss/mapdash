@@ -60,6 +60,7 @@ private struct Snapshot: Equatable {
     var gameVersion: String?
     var lastFullScan: Date?
     var emptyFullScans: Int
+    var listUnreadable: Int?
     var stats: Stats
     var installing: Bool
 }
@@ -79,6 +80,9 @@ final class AppModel: ObservableObject {
     private(set) var lastFullScan: Date?
     /// Full scans in a row that found no lobby while the game ran. See `gameUpdateSuspect`.
     private(set) var emptyFullScans = 0
+    /// What each detection path saw in the last scan (diagnostics only).
+    private(set) var detection = Detection()
+    private var reportedFallback = false
     private(set) var stats = Stats()
     private(set) var installingUpdate = false
     let settings = Settings()
@@ -127,7 +131,8 @@ final class AppModel: ObservableObject {
         guard !menuOpen else { return }
         let now = Snapshot(maps: maps, scan: scan, update: update?.version, folderBytes: folderBytes,
                            freeBytes: freeBytes, gamePID: gamePID, gameVersion: gameVersion,
-                           lastFullScan: lastFullScan, emptyFullScans: emptyFullScans, stats: stats,
+                           lastFullScan: lastFullScan, emptyFullScans: emptyFullScans,
+                           listUnreadable: listUnreadable, stats: stats,
                            installing: installingUpdate)
         guard now != lastSent else { return }
         lastSent = now
@@ -151,6 +156,17 @@ final class AppModel: ObservableObject {
         case .noAccess, .failed: return (old, new)
         default: return nil
         }
+    }
+
+    /// Lobbies in the game's own list while MapDash finds none, two full scans in a row: reading is
+    /// broken even without a game patch (issue #1 was such a case). Both the list and MapDash's own
+    /// finds linger in memory after the Custom Games list is closed (measured: 209 listed, ~90
+    /// objects), so this does not depend on the list being open right now. Not ruled out: the game
+    /// freeing its objects while keeping the list, which would make this a false alarm.
+    var listUnreadable: Int? {
+        guard gameUpdateSuspect == nil, case .reading(0) = scan, emptyFullScans >= 2,
+              detection.listed >= 10 else { return nil }
+        return detection.listed
     }
 
     func setInstalling(_ value: Bool) {
@@ -214,20 +230,21 @@ final class AppModel: ObservableObject {
                 }
                 round += 1
                 var kr: Int32 = 0
-                var n = md_scan(pid, 0, &buffer, Int32(buffer.count), &kr)
+                var stats = md_stats_t()
+                var n = md_scan(pid, 0, &buffer, Int32(buffer.count), &kr, &stats)
                 var games = n > 0 ? Array(buffer[0..<Int(n)]).map(Lobby.init) : []
                 var fullScan = false
                 if n >= 0 && round % Constants.fullScanEvery == 0 {
                     // Cross-check the fast region filter against a scan of all memory. A lobby
                     // opened between two scans is not a miss, so the fast scan runs again after
                     // the full one and only what neither fast scan saw is reported.
-                    n = md_scan(pid, 1, &buffer, Int32(buffer.count), &kr)
+                    n = md_scan(pid, 1, &buffer, Int32(buffer.count), &kr, &stats)
                     fullScan = n >= 0
                     if n > 0 {
                         let full = Array(buffer[0..<Int(n)]).map(Lobby.init)
                         var fast = Set(games.map(\.sha1))
                         var kr2: Int32 = 0
-                        let n2 = md_scan(pid, 0, &buffer, Int32(buffer.count), &kr2)
+                        let n2 = md_scan(pid, 0, &buffer, Int32(buffer.count), &kr2, nil)
                         if n2 > 0 { fast.formUnion(buffer[0..<Int(n2)].map { Lobby($0).sha1 }) }
                         for lobby in full where !fast.contains(lobby.sha1) {
                             Log.write("fast scan missed \(lobby.sha1) \(lobby.path)")
@@ -236,17 +253,31 @@ final class AppModel: ObservableObject {
                     }
                 }
                 let state: ScanState = n == -1 ? .noAccess(kr) : n < 0 ? .failed : .reading(games.count)
-                await self?.scanFinished(state: state, pid: pid, games: n >= 0 ? games : nil, fullScan: fullScan)
+                let seen = Detection(stats)
+                await self?.scanFinished(state: state, pid: pid, games: n >= 0 ? games : nil, fullScan: fullScan,
+                                         detection: seen)
                 try? await Task.sleep(nanoseconds: Constants.scanInterval * 1_000_000_000)
             }
         }
     }
 
-    private func scanFinished(state: ScanState, pid: pid_t, games: [Lobby]?, fullScan: Bool) {
+    private func scanFinished(state: ScanState, pid: pid_t, games: [Lobby]?, fullScan: Bool,
+                              detection: Detection = Detection()) {
         if pid != gamePID { gameStarted(pid) }
+        self.detection = detection
+        // The statstring path is the fallback for a game patch that changes the lobby object.
+        // MapDash keeps working then, but the log should say so once, for the next fix.
+        if detection.objects == 0, detection.statstrings > 0, !reportedFallback {
+            reportedFallback = true
+            Log.write("lobby objects not recognised in game version \(gameVersion ?? "unknown"): "
+                      + "\(detection.statstrings) lobbies found through their statstrings only")
+        }
         if fullScan {
             lastFullScan = Date()
             emptyFullScans = games?.isEmpty == true ? emptyFullScans + 1 : 0
+            if emptyFullScans == 2, let listed = listUnreadable {
+                Log.write("the game lists \(listed) lobbies but MapDash finds none (game version \(gameVersion ?? "unknown"))")
+            }
         }
         if state != scan {
             if case .noAccess(let kr) = state { Log.write("cannot read the game (task_for_pid \(kr))") }
@@ -279,6 +310,7 @@ final class AppModel: ObservableObject {
     private func gameStarted(_ pid: pid_t) {
         gamePID = pid
         emptyFullScans = 0
+        reportedFallback = false
         guard pid != 0 else { gameVersion = nil; return }
         let bundle = NSRunningApplication(processIdentifier: pid)?.bundleURL.flatMap(Bundle.init(url:))
         gameVersion = bundle?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
@@ -605,6 +637,19 @@ private func folderSize(_ dir: URL) -> Int64 {
         total += Int64((try? url.resourceValues(forKeys: [.totalFileAllocatedSizeKey]))?.totalFileAllocatedSize ?? 0)
     }
     return total
+}
+
+/// Swift copy of the scanner's per-path counts, see md_stats_t.
+struct Detection: Equatable {
+    var objects = 0, statstrings = 0, unconfirmed = 0, listed = 0
+
+    init() {}
+    init(_ s: md_stats_t) {
+        objects = Int(s.objects)
+        statstrings = Int(s.statstrings)
+        unconfirmed = Int(s.unconfirmed)
+        listed = Int(s.listed)
+    }
 }
 
 /// Swift copy of one scanner result.

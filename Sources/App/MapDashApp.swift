@@ -191,6 +191,15 @@ struct MenuContent: View {
                     Diagnostics.report(model, title: "Not working with Warcraft III \(suspect.new)")
                 }
             }
+        } else if let listed = model.listUnreadable {
+            Text("MapDash cannot read the lobby list")
+            Text("The game lists \(listed) lobbies, MapDash finds none.")
+            Text(model.update == nil ? "MapDash probably needs an update." : "Install the MapDash update above.")
+            if model.update == nil {
+                Button("Report this on GitHub…") {
+                    Diagnostics.report(model, title: "MapDash finds no lobbies (game lists \(listed))")
+                }
+            }
         } else {
             scanStatus
         }

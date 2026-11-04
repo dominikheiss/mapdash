@@ -80,6 +80,7 @@ like; MapDash itself never deletes anything.
 | *MapDash needs an administrator account* | Use an admin account. |
 | *Warcraft III was updated* | A game patch probably changed how the game stores its lobby list. MapDash checks for an update right away. If there is none yet, choose **Report this on GitHub…**. |
 | *No lobbies found* while the list is open | Check for a MapDash update, or choose **Report a problem…**. |
+| *MapDash cannot read the lobby list* | The game lists lobbies but MapDash finds none. Check for a MapDash update, or choose **Report this on GitHub…**. |
 | *Update available* offers no install button | MapDash can only replace itself in a folder you can write to. Move it to *Applications* and open it from there. |
 | *Different version on disk* | Your map folder has an older file with the same name. MapDash never replaces files, so the game downloads the new version itself. Click the entry to show the old file in Finder. |
 | Firewall (e.g. Little Snitch) asks about `curl` | Allow it. MapDash uses `curl` to download from `ugc.cdn.warcraft3-prod.battle.net`. |
@@ -102,8 +103,15 @@ Requires the Command Line Tools only (`xcode-select --install`):
 scripts/build.sh      # -> build/MapDash.app, build/MapDash-<version>.zip
 ```
 
-`Sources/Scanner/scanner.c` finds the lobby objects in the game's memory. Each object holds the
-map path, the host and the map's SHA-1. Reading works without root because:
+`Sources/Scanner/scanner.c` finds the lobbies in the game's memory in three independent ways, so
+one game patch does not blind it:
+- the game's lobby objects (name, map path, host and the map's SHA-1);
+- the lobby's Battle.net statstring on its own (map path, host, SHA-1), wherever it sits - this
+  still works when a patch changes the object layout;
+- the game's own lobby list, which has no SHA-1 but confirms that a lobby found only by its
+  statstring is real and supplies its name.
+
+Reading works without root because:
 - the game binary carries `get-task-allow`;
 - admin accounts are members of `_developer`.
 

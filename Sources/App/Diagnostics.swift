@@ -57,7 +57,9 @@ enum Diagnostics {
         case .reading(let n): add("Reading", "ok, \(n) lobbies")
         case .failed: add("Reading", "region walk failed")
         }
-        add("Last full scan", (model.lastFullScan.map { stamp($0) } ?? "none yet") + ", empty in a row: \(model.emptyFullScans)")
+        let d = model.detection
+        add("Detection", "object \(d.objects), statstring \(d.statstrings), dropped \(d.unconfirmed), game list \(d.listed)")
+        add("Last full scan",(model.lastFullScan.map { stamp($0) } ?? "none yet") + ", empty in a row: \(model.emptyFullScans)")
         add("Free space", model.freeBytes.map { "\($0 / 1_000_000_000) GB" } ?? "unknown")
         add("Map folder", "\(tilde(Paths.mapDir.path)) (\(FileManager.default.fileExists(atPath: Paths.mapDir.path) ? formatMB(model.folderBytes) : "missing"))")
         add("Settings", "auto=\(s.auto) limit=\(s.thresholdMB)MB parallel=\(s.parallel) rate=\(s.rateLimitMB)MB/s "
